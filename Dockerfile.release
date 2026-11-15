@@ -1,0 +1,27 @@
+# Builds the standalone pam_oidc.so release artifact, running the unit tests
+# and a real-PAM smoke test (hack/smoke-test.sh) before exporting.
+#
+# glibc only: musl's loader refuses to dlopen Go c-shared libraries (Go's
+# runtime uses initial-exec TLS), so there is no musl build of the .so.
+#
+#   docker build -f Dockerfile.release --output dist .
+#
+# The glibc build is on Debian 12 so the result needs only glibc >= 2.34.
+
+ARG GO_VERSION=1.26
+
+FROM golang:${GO_VERSION}-bookworm AS gnu
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libpam0g-dev \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY *.go *.c ./
+COPY hack/smoke-test.sh hack/pamcheck.c hack/
+RUN go test -count=1 ./... \
+ && go build -trimpath -buildmode=c-shared -o /out/pam_oidc.so . \
+ && sh hack/smoke-test.sh /out/pam_oidc.so
+
+FROM scratch AS artifacts
+COPY --from=gnu /out/pam_oidc.so /pam_oidc-linux-amd64-gnu.so

@@ -6,3 +6,4 @@ nfpm.yaml
 nfpm-*.yaml
 *.rpm
 *.deb
+dist/

@@ -36,6 +36,34 @@ Another independent fork, [MatthiasValvekens/pam_oidc](https://github.com/Matthi
 takes a different route: it vendors and maintains `pardot/oidc` itself and adds
 on-disk caching of signing keys.
 
+## Installing
+
+Tagged [releases](https://github.com/bmurray/pam_oidc/releases) provide, with a
+`SHA256SUMS` file:
+
+- `libpam-oidc_<version>_amd64.deb` for Debian and Ubuntu (installs to
+  `/usr/lib/x86_64-linux-gnu/security`)
+- `pam_oidc-<version>-1.x86_64.rpm` for RHEL and Fedora (installs to
+  `/usr/lib64/security`)
+- `pam_oidc-<version>-linux-amd64-gnu.so`, the bare module, for container
+  images or any other layout: copy it into your PAM module directory as
+  `pam_oidc.so`, or reference it by absolute path in the PAM config.
+
+The module is self-contained (the Go runtime and all Go dependencies are built
+in). At runtime it needs:
+
+- **glibc 2.34 or newer** (Debian 12+, Ubuntu 22.04+, RHEL 9+) and **Linux-PAM**
+  (`libpam.so.0`). It must be a shared object loaded by PAM, so it can't be
+  fully static.
+- **A CA bundle** at a standard path (for example
+  `/etc/ssl/certs/ca-certificates.crt` or `/etc/pki/tls/certs/ca-bundle.crt`) to
+  verify the issuer's HTTPS certificate. Minimal container images often lack one.
+- **Network access** to the issuer's discovery document and JWKS at login time.
+
+**musl (Alpine) is not supported.** musl's loader refuses to `dlopen` Go
+`c-shared` libraries, because the Go runtime uses the initial-exec TLS model,
+and PAM always loads modules with `dlopen`.
+
 ## Example Usage
 
 In `/etc/pam.d/service`:
