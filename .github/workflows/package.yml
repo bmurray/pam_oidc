@@ -28,7 +28,9 @@ jobs:
       - name: Build standalone .so (glibc) with real-PAM smoke test
         run: |
           docker build -f Dockerfile.release --output dist .
-          mv dist/pam_oidc-linux-amd64-gnu.so "pam_oidc-$(hack/package_version.sh)-linux-amd64-gnu.so"
+          v=$(hack/package_version.sh)
+          # Strip a tag's leading "v" so the name matches the deb/rpm versions.
+          mv dist/pam_oidc-linux-amd64-gnu.so "pam_oidc-${v#v}-linux-amd64-gnu.so"
 
       - name: Checksums
         run: sha256sum libpam-oidc_*.deb pam_oidc-*.rpm pam_oidc-*.so | tee SHA256SUMS
