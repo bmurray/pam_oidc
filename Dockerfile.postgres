@@ -1,0 +1,25 @@
+# PostgreSQL with pam_oidc: roles authenticated by `pam` in pg_hba.conf log in
+# with an OIDC token (e.g. a Kubernetes ServiceAccount token) as the password.
+# The PAM service config and pg_hba.conf are mounted at deploy time.
+#
+#   docker build -f Dockerfile.postgres -t ghcr.io/bmurray/postgres-oidc:18 .
+#
+# Unlike MariaDB, PostgreSQL runs PAM inside the per-connection backend
+# process, so the module (and the Go runtime) load in-process there.
+
+FROM golang:1.27-bookworm AS build
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libpam0g-dev \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY *.go *.c ./
+RUN go vet ./... && go test -count=1 ./... \
+ && go build -trimpath -buildmode=c-shared -o /out/pam_oidc.so .
+
+FROM postgres:18-trixie
+COPY --from=build /out/pam_oidc.so /usr/lib/x86_64-linux-gnu/security/pam_oidc.so
+# pam_oidc fetches the issuer's discovery doc and JWKS over HTTPS; the base
+# image does not ship a CA bundle Go can find.
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt

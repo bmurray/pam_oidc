@@ -32,6 +32,8 @@ Linux-PAM extensions are used, so currently the module only supports Linux. Cont
 - **Debian/Ubuntu packages.** Tagged releases ship a `.deb` (`libpam-oidc`,
   installed to `/usr/lib/x86_64-linux-gnu/security`) alongside the RPM
   (`pam_oidc`, `/usr/lib64/security`). Build locally with `make deb` or `make rpm`.
+- **[`Dockerfile.postgres`](Dockerfile.postgres)** builds PostgreSQL 18 with
+  the module installed (see [PostgreSQL](#postgresql)), with an integration test.
 - The Go module path is now `github.com/bmurray/pam_oidc`.
 
 Another independent fork, [MatthiasValvekens/pam_oidc](https://github.com/MatthiasValvekens/pam_oidc),
@@ -194,6 +196,40 @@ volumes:
 MariaDB's `auth_pam` runs PAM in a separate helper process (`auth_pam_tool`), so
 the Go runtime never runs inside `mariadbd`. Its stderr is the server's, so
 `pam_oidc:` messages appear in the server log.
+
+## PostgreSQL
+
+PostgreSQL authenticates through PAM natively (`pam` in `pg_hba.conf`), so the
+same module and the same PAM service config work. Unlike MariaDB, PostgreSQL
+runs PAM inside each connection's backend process, so the module and the Go
+runtime load in-process there. The integration test
+([`hack/postgres-test.sh`](hack/postgres-test.sh), run in CI via
+[`Dockerfile.pgtest`](Dockerfile.pgtest)) checks that backend features relying
+on PostgreSQL's own signal handling keep working in a token-authenticated
+session: latch waits, `statement_timeout`, cancellation from another session,
+parallel query, and `LISTEN`/`NOTIFY`.
+
+`pg_hba.conf`. The token is sent as a cleartext password, so accept TCP only
+over TLS and reject the rest:
+
+```
+hostssl all all 0.0.0.0/0 pam pamservice=postgres-oidc
+host    all all 0.0.0.0/0 reject
+```
+
+`/etc/pam.d/postgres-oidc` takes the same form as the MariaDB example above,
+with its own audience (for example `aud=postgres`), so a token minted for one
+database can't be replayed against the other.
+
+Roles need no password:
+
+```sql
+CREATE ROLE "apps:billing" LOGIN;
+CREATE DATABASE billing OWNER "apps:billing";
+```
+
+Clients pass the token as the password, for example with libpq:
+`PGPASSWORD="$(cat /var/run/secrets/postgres/token)" psql "host=... user=apps:billing sslmode=verify-full"`.
 
 ## Development
 

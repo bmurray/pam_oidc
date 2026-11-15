@@ -1,0 +1,19 @@
+# Runs hack/postgres-test.sh: PostgreSQL authenticating through pam_oidc,
+# against a throwaway local issuer.
+#
+#   docker build -f Dockerfile.postgres -t postgres-oidc .
+#   docker build -f Dockerfile.pgtest --build-arg IMAGE=postgres-oidc .
+
+ARG IMAGE=ghcr.io/bmurray/postgres-oidc:18
+
+FROM golang:1.27-bookworm AS issuer
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY hack/testissuer hack/testissuer
+RUN CGO_ENABLED=0 go build -o /out/testissuer ./hack/testissuer
+
+FROM ${IMAGE}
+COPY --from=issuer /out/testissuer /usr/local/bin/testissuer
+COPY hack/postgres-test.sh /usr/local/bin/postgres-test.sh
+RUN bash /usr/local/bin/postgres-test.sh

@@ -39,3 +39,18 @@ jobs:
 
       - name: Smoke-test on ${{ matrix.base }}
         run: docker build -f Dockerfile.distrotest --build-arg BASE=${{ matrix.base }} .
+
+  postgres:
+    # PostgreSQL loads the module into each backend process; check that token
+    # auth works and that the Go runtime doesn't disturb PostgreSQL's own
+    # signal handling (see hack/postgres-test.sh).
+    name: PostgreSQL integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build PostgreSQL image
+        run: docker build -f Dockerfile.postgres -t postgres-oidc .
+
+      - name: Integration test
+        run: docker build -f Dockerfile.pgtest --build-arg IMAGE=postgres-oidc .
