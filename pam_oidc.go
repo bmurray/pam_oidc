@@ -26,6 +26,7 @@ import (
 	"context"
 	"fmt"
 	"log/syslog"
+	"os"
 	"unsafe"
 )
 
@@ -90,10 +91,11 @@ func pam_sm_authenticate_go(pamh *C.pam_handle_t, flags C.int, argc C.int, argv 
 	auth.RequireACRs = cfg.RequireACRs
 
 	if err := auth.Authenticate(ctx, user, token); err != nil {
-		pamSyslog(pamh, syslog.LOG_WARNING, "failed to authenticate: %v", err)
+		pamSyslog(pamh, syslog.LOG_WARNING, "failed to authenticate %q: %v", user, err)
 		return C.PAM_AUTH_ERR
 	}
 
+	pamSyslog(pamh, syslog.LOG_INFO, "authenticated %q", user)
 	return C.PAM_SUCCESS
 }
 
@@ -107,8 +109,14 @@ func pamStrError(pamh *C.pam_handle_t, errnum C.int) string {
 }
 
 func pamSyslog(pamh *C.pam_handle_t, priority syslog.Priority, format string, a ...interface{}) {
-	cstr := C.CString(fmt.Sprintf(format, a...))
+	msg := fmt.Sprintf(format, a...)
+	cstr := C.CString(msg)
 	defer C.free(unsafe.Pointer(cstr))
 
 	C.pam_syslog_str(pamh, C.int(priority), cstr)
+
+	// Containers usually have no syslog daemon, so the syslog copy is lost.
+	// MariaDB's auth_pam_tool inherits the server's stderr, which is the
+	// container log. Messages never include the token.
+	fmt.Fprintf(os.Stderr, "pam_oidc: %s\n", msg)
 }
