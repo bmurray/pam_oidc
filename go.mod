@@ -1,15 +1,17 @@
 module github.com/bmurray/pam_oidc
 
-go 1.26.0
+go 1.27.0
+
+toolchain go1.27.4
 
 require (
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/go-jose/go-jose/v4 v4.1.9
-	github.com/google/go-cmp v0.5.5
+	github.com/google/go-cmp v0.7.0
 	golang.org/x/net v0.62.0
 )
 
 require (
-	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/text v0.43.0 // indirect
+	golang.org/x/oauth2 v0.38.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 )

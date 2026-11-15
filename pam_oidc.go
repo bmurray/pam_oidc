@@ -39,7 +39,7 @@ func pam_sm_authenticate_go(pamh *C.pam_handle_t, flags C.int, argc C.int, argv 
 
 	// Copy args to Go strings
 	args := make([]string, int(argc))
-	for i := 0; i < int(argc); i++ {
+	for i := range int(argc) {
 		args[i] = C.GoString(C.argv_i(argv, C.int(i)))
 	}
 
@@ -108,7 +108,7 @@ func pamStrError(pamh *C.pam_handle_t, errnum C.int) string {
 	return C.GoString(C.pam_strerror(pamh, errnum))
 }
 
-func pamSyslog(pamh *C.pam_handle_t, priority syslog.Priority, format string, a ...interface{}) {
+func pamSyslog(pamh *C.pam_handle_t, priority syslog.Priority, format string, a ...any) {
 	msg := fmt.Sprintf(format, a...)
 	cstr := C.CString(msg)
 	defer C.free(unsafe.Pointer(cstr))

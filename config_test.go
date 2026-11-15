@@ -62,7 +62,6 @@ func TestParseConfigFromArgs(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 
 		config, err := configFromArgs(tc.args)
 		if err != nil && tc.wantErr == "" {

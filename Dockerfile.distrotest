@@ -1,0 +1,18 @@
+# Runs the real-PAM smoke test against a built release .so on a given distro,
+# to check the supported-distribution promise rather than infer it from symbol
+# versions. Build the .so first (Dockerfile.release --output dist), then:
+#
+#   docker build -f Dockerfile.distrotest --build-arg BASE=ubuntu:22.04 .
+
+ARG BASE=debian:12
+FROM ${BASE}
+# gcc and the PAM headers are only for the hack/pamcheck.c test harness.
+RUN if command -v apt-get >/dev/null; then \
+      apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev libpam0g-dev \
+      && apt-get clean; \
+    else \
+      dnf install -y gcc pam-devel && dnf clean all; \
+    fi
+COPY dist/pam_oidc-linux-amd64-gnu.so /pam_oidc.so
+COPY hack/smoke-test.sh hack/pamcheck.c /hack/
+RUN . /etc/os-release && echo "testing on $PRETTY_NAME" && sh /hack/smoke-test.sh /pam_oidc.so

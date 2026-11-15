@@ -36,30 +36,30 @@ func configFromArgs(args []string) (*config, error) {
 	c := &config{}
 
 	for _, arg := range args {
-		parts := strings.SplitN(arg, "=", 2)
-		if len(parts) != 2 {
+		key, value, ok := strings.Cut(arg, "=")
+		if !ok {
 			return nil, fmt.Errorf("malformed arg: %v", arg)
 		}
 
-		switch parts[0] {
+		switch key {
 		case "issuer":
-			c.Issuer = parts[1]
+			c.Issuer = value
 		case "aud":
-			c.Aud = parts[1]
+			c.Aud = value
 		case "user_template":
-			c.UserTemplate = parts[1]
+			c.UserTemplate = value
 		case "groups_claim_key":
-			c.GroupsClaimKey = parts[1]
+			c.GroupsClaimKey = value
 		case "authorized_groups":
-			c.AuthorizedGroups = strings.Split(parts[1], ",")
+			c.AuthorizedGroups = strings.Split(value, ",")
 		case "require_acr":
-			c.RequireACRs = []string{parts[1]}
+			c.RequireACRs = []string{value}
 		case "require_acrs":
-			c.RequireACRs = strings.Split(parts[1], ",")
+			c.RequireACRs = strings.Split(value, ",")
 		case "http_proxy":
-			c.HTTPProxy = parts[1]
+			c.HTTPProxy = value
 		default:
-			return nil, fmt.Errorf("unknown option: %v", parts[0])
+			return nil, fmt.Errorf("unknown option: %v", key)
 		}
 	}
 

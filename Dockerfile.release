@@ -6,9 +6,12 @@
 #
 #   docker build -f Dockerfile.release --output dist .
 #
-# The glibc build is on Debian 12 so the result needs only glibc >= 2.34.
+# The build base sets the glibc floor. Debian 12 yields glibc >= 2.34, which
+# covers every supported Debian (12, 13) and Ubuntu (22.04, 24.04, 26.04)
+# release; Ubuntu 22.04's 2.35 is the oldest. Move the base forward only once
+# the oldest supported release has a newer glibc than the new base needs.
 
-ARG GO_VERSION=1.26
+ARG GO_VERSION=1.27
 
 FROM golang:${GO_VERSION}-bookworm AS gnu
 RUN apt-get update \

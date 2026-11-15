@@ -8,10 +8,10 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
@@ -20,3 +20,22 @@ jobs:
 
       - name: Test
         run: make test
+
+  distros:
+    # The README promises the release .so works on every supported Debian,
+    # Ubuntu and RHEL-family release; check it with a real-PAM smoke test on
+    # each one's own image.
+    name: Supported distros
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        base: [debian:12, debian:13, ubuntu:22.04, ubuntu:24.04, ubuntu:26.04, almalinux:9, almalinux:10]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build release .so
+        run: docker build -f Dockerfile.release --output dist .
+
+      - name: Smoke-test on ${{ matrix.base }}
+        run: docker build -f Dockerfile.distrotest --build-arg BASE=${{ matrix.base }} .

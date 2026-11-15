@@ -20,6 +20,8 @@ Linux-PAM extensions are used, so currently the module only supports Linux. Cont
   [`coreos/go-oidc` v3](https://github.com/coreos/go-oidc) and `go-jose` v4:
   discovery with issuer matching, cached JWKS, and signature, issuer, audience
   and expiry checks. Options and user templates are unchanged.
+- **Current Go.** Built with Go 1.27 and current dependencies, using modern
+  Go idioms throughout.
 - **Logs to stderr as well as syslog**, since containers usually have no syslog
   daemon. Successful logins are logged by username. Tokens are never logged.
 - **Tests rewritten** around an in-process issuer, covering wrong audience or
@@ -52,9 +54,13 @@ Tagged [releases](https://github.com/bmurray/pam_oidc/releases) provide, with a
 The module is self-contained (the Go runtime and all Go dependencies are built
 in). At runtime it needs:
 
-- **glibc 2.34 or newer** (Debian 12+, Ubuntu 22.04+, RHEL 9+) and **Linux-PAM**
-  (`libpam.so.0`). It must be a shared object loaded by PAM, so it can't be
-  fully static.
+- **A supported glibc distribution**: currently supported releases of Debian
+  (12, 13) and Ubuntu (22.04, 24.04, 26.04), and RHEL 9 or newer. Builds target
+  glibc 2.34, below the oldest of these. Releases that have reached end of life
+  are not supported. CI loads the module through a real PAM stack on each of
+  these releases.
+- **Linux-PAM** (`libpam.so.0`). The module must be a shared object loaded by
+  PAM, so it can't be fully static.
 - **A CA bundle** at a standard path (for example
   `/etc/ssl/certs/ca-certificates.crt` or `/etc/pki/tls/certs/ca-bundle.crt`) to
   verify the issuer's HTTPS certificate. Minimal container images often lack one.
@@ -189,45 +195,22 @@ MariaDB's `auth_pam` runs PAM in a separate helper process (`auth_pam_tool`), so
 the Go runtime never runs inside `mariadbd`. Its stderr is the server's, so
 `pam_oidc:` messages appear in the server log.
 
-## Local Testing
+## Development
 
-A Vagrant VM is available for local testing:
-
-```
-vagrant up
-```
-
-By default, PAM is setup with Percona Server to accept OpenID Connect tokens from the Google Cloud SDK using email address as the username:
+Unit tests cover token verification and need no PAM headers:
 
 ```
-gcloud auth login
-gcloud auth print-identity-token
+CGO_ENABLED=0 go test ./...
 ```
 
-Within the VM, create a database user to authenticate using PAM:
+The full build compiles the module against Linux-PAM, runs the tests, and then
+loads the module through a real PAM stack (`hack/smoke-test.sh`). It runs in
+Docker, so the host needs no PAM development headers:
 
 ```
-vagrant ssh
-
-# within the Vagrant VM
-sudo mysql -u root
-
-# within the MySQL monitor
-CREATE USER 'jdoe@gmail.com'@'%' IDENTIFIED WITH auth_pam;
+docker build -f Dockerfile.release --output dist .   # writes dist/pam_oidc-linux-amd64-gnu.so
+docker build -f Dockerfile.mariadb -t mariadb-oidc . # MariaDB image with the module
 ```
 
-With the token from `gcloud auth print-identity-token`, attempt to login:
-
-```
-TOKEN="..." # paste from `gcloud auth print-identity-token`
-
-# The token must be specified using --password=... because it is too long for
-# MySQL to accept interactively
-mysql --user="jdoe@gmail.com" --password="$TOKEN"
-```
-
-To debug failures, check the auth logs:
-
-```
-sudo tail -f /var/log/auth.log
-```
+`make deb` and `make rpm` build packages from a compiled `pam_oidc.so` (they
+need [nfpm](https://nfpm.goreleaser.com/)).

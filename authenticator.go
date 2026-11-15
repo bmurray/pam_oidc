@@ -82,7 +82,7 @@ func discoverAuthenticator(ctx context.Context, issuer string, aud string, httpP
 	// configured one, so a token can't be verified against the wrong issuer.
 	provider, err := oidc.NewProvider(ctx, issuer)
 	if err != nil {
-		return nil, fmt.Errorf("discovering verifier: %v", err)
+		return nil, fmt.Errorf("discovering verifier: %w", err)
 	}
 
 	// ClientID is the required audience: the verifier rejects tokens whose aud
@@ -96,12 +96,12 @@ func discoverAuthenticator(ctx context.Context, issuer string, aud string, httpP
 func (a *authenticator) Authenticate(ctx context.Context, user string, token string) error {
 	idToken, err := a.verifier.Verify(ctx, token)
 	if err != nil {
-		return fmt.Errorf("verifying token: %v", err)
+		return fmt.Errorf("verifying token: %w", err)
 	}
 
 	c := claims{Subject: idToken.Subject}
 	if err := idToken.Claims(&c.Extra); err != nil {
-		return fmt.Errorf("decoding claims: %v", err)
+		return fmt.Errorf("decoding claims: %w", err)
 	}
 	if acr, ok := c.Extra["acr"].(string); ok {
 		c.ACR = acr
@@ -117,12 +117,12 @@ func (a *authenticator) Authenticate(ctx context.Context, user string, token str
 		"trimSuffix": func(suffix, s string) string { return strings.TrimSuffix(s, suffix) },
 	}).Parse(userTemplate)
 	if err != nil {
-		return fmt.Errorf("parsing user template: %v", err)
+		return fmt.Errorf("parsing user template: %w", err)
 	}
 
 	buf := new(bytes.Buffer)
 	if err := userTmpl.Execute(buf, c); err != nil {
-		return fmt.Errorf("executing user template: %v", err)
+		return fmt.Errorf("executing user template: %w", err)
 	}
 
 	wantUser := buf.String()
