@@ -7,40 +7,98 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/rsa"
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/pardot/oidc"
-	"github.com/pardot/oidc/signer"
-	"gopkg.in/square/go-jose.v2"
+	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 )
 
-func TestAuthenticate(t *testing.T) {
-	now := time.Now()
+// testIssuer is an in-process OIDC issuer: it serves a discovery document and
+// JWKS for signingKey, and mints tokens with it.
+type testIssuer struct {
+	t          *testing.T
+	srv        *httptest.Server
+	signingKey *rsa.PrivateKey
+	// discoveryIssuer overrides the issuer advertised in the discovery doc.
+	discoveryIssuer string
+}
 
-	signingKey := jose.SigningKey{
-		Algorithm: jose.RS256,
-		Key: jose.JSONWebKey{
-			Key:       testKey,
-			KeyID:     "test-key",
-			Algorithm: string(jose.RS256),
-			Use:       "sig",
-		},
+func newTestIssuer(t *testing.T) *testIssuer {
+	t.Helper()
+	ti := &testIssuer{t: t, signingKey: mustKey(t)}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		iss := ti.URL()
+		if ti.discoveryIssuer != "" {
+			iss = ti.discoveryIssuer
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"issuer":                                iss,
+			"jwks_uri":                              ti.URL() + "/jwks",
+			"id_token_signing_alg_values_supported": []string{"RS256"},
+		})
+	})
+	mux.HandleFunc("/jwks", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
+			Key: ti.signingKey.Public(), KeyID: "test-key", Algorithm: string(jose.RS256), Use: "sig",
+		}}})
+	})
+	ti.srv = httptest.NewServer(mux)
+	t.Cleanup(ti.srv.Close)
+	return ti
+}
+
+func (ti *testIssuer) URL() string { return ti.srv.URL }
+
+// token signs claims with key (the issuer's own key when nil).
+func (ti *testIssuer) token(key *rsa.PrivateKey, std jwt.Claims, extra map[string]any) string {
+	ti.t.Helper()
+	if key == nil {
+		key = ti.signingKey
 	}
-	verificationKeys := []jose.JSONWebKey{
-		{
-			Key:       testKey.Public(),
-			KeyID:     "test-key",
-			Algorithm: string(jose.RS256),
-			Use:       "sig",
-		},
+	sig, err := jose.NewSigner(
+		jose.SigningKey{Algorithm: jose.RS256, Key: jose.JSONWebKey{Key: key, KeyID: "test-key"}},
+		(&jose.SignerOptions{}).WithType("JWT"),
+	)
+	if err != nil {
+		ti.t.Fatal(err)
 	}
-	signer := signer.NewStatic(signingKey, verificationKeys)
+	raw, err := jwt.Signed(sig).Claims(std).Claims(extra).Serialize()
+	if err != nil {
+		ti.t.Fatal(err)
+	}
+	return raw
+}
+
+func mustKey(t *testing.T) *rsa.PrivateKey {
+	t.Helper()
+	k, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
+}
+
+func TestAuthenticate(t *testing.T) {
+	ti := newTestIssuer(t)
+	now := time.Now()
+	valid := func(sub string) jwt.Claims {
+		return jwt.Claims{
+			Issuer:   ti.URL(),
+			Subject:  sub,
+			Audience: jwt.Audience{"mariadb"},
+			Expiry:   jwt.NewNumericDate(now.Add(time.Hour)),
+			IssuedAt: jwt.NewNumericDate(now),
+		}
+	}
+	const k8sTemplate = `{{.Subject | trimPrefix "system:serviceaccount:"}}`
 
 	cases := []struct {
 		name             string
@@ -53,290 +111,142 @@ func TestAuthenticate(t *testing.T) {
 		wantErr          string
 	}{
 		{
-			name: "valid user, valid token",
+			name:  "valid user, valid token",
+			user:  "jdoe",
+			token: ti.token(nil, valid("jdoe"), nil),
+		},
+		{
+			name:         "kubernetes serviceaccount subject maps to ns:name",
+			user:         "apps:billing",
+			token:        ti.token(nil, valid("system:serviceaccount:apps:billing"), nil),
+			userTemplate: k8sTemplate,
+		},
+		{
+			name:         "serviceaccount from another namespace is rejected",
+			user:         "apps:billing",
+			token:        ti.token(nil, valid("system:serviceaccount:other:billing"), nil),
+			userTemplate: k8sTemplate,
+			wantErr:      `expected user "other:billing" but is authenticating as "apps:billing"`,
+		},
+		{
+			name:    "user does not match subject",
+			user:    "jdoe",
+			token:   ti.token(nil, valid("someone-else"), nil),
+			wantErr: "expected user",
+		},
+		{
+			name: "wrong audience",
 			user: "jdoe",
-			token: mustJWT(t, signer, oidc.Claims{
-				Issuer:    "https://example.com",
-				Subject:   "jdoe",
-				Audience:  []string{"valid-aud"},
-				Expiry:    oidc.UnixTime(now.Add(10 * time.Minute).Unix()),
-				NotBefore: oidc.UnixTime(now.Add(-10 * time.Minute).Unix()),
-				IssuedAt:  oidc.UnixTime(now.Unix()),
-			}),
-			wantErr: "",
+			token: ti.token(nil, func() jwt.Claims {
+				c := valid("jdoe")
+				c.Audience = jwt.Audience{"https://kubernetes.default.svc.cluster.local"}
+				return c
+			}(), nil),
+			wantErr: "expected audience",
 		},
 		{
-			name: "valid user, valid token, custom user template",
-			user: "jdoe:valid-aud",
-			token: mustJWT(t, signer, oidc.Claims{
-				Issuer:    "https://example.com",
-				Subject:   "jdoe",
-				Audience:  []string{"valid-aud"},
-				Expiry:    oidc.UnixTime(now.Add(10 * time.Minute).Unix()),
-				NotBefore: oidc.UnixTime(now.Add(-10 * time.Minute).Unix()),
-				IssuedAt:  oidc.UnixTime(now.Unix()),
-			}),
-			userTemplate: "{{.Subject}}:{{index .Audience 0}}",
-			wantErr:      "",
-		},
-		{
-			name: "valid user, valid token, member of authorized group",
+			name: "wrong issuer",
 			user: "jdoe",
-			token: mustJWT(t, signer, oidc.Claims{
-				Issuer:    "https://example.com",
-				Subject:   "jdoe",
-				Audience:  []string{"valid-aud"},
-				Expiry:    oidc.UnixTime(now.Add(10 * time.Minute).Unix()),
-				NotBefore: oidc.UnixTime(now.Add(-10 * time.Minute).Unix()),
-				IssuedAt:  oidc.UnixTime(now.Unix()),
-				Extra: map[string]interface{}{
-					"roles": []string{"group-a", "group-b"},
-				},
-			}),
-			groupsClaimKey:   "roles",
-			authorizedGroups: []string{"group-a"},
-			wantErr:          "",
+			token: ti.token(nil, func() jwt.Claims {
+				c := valid("jdoe")
+				c.Issuer = "https://evil.example.com"
+				return c
+			}(), nil),
+			wantErr: "id token issued by a different provider",
 		},
 		{
-			name: "valid user, valid token, not member of authorized group",
+			name: "expired token",
 			user: "jdoe",
-			token: mustJWT(t, signer, oidc.Claims{
-				Issuer:    "https://example.com",
-				Subject:   "jdoe",
-				Audience:  []string{"valid-aud"},
-				Expiry:    oidc.UnixTime(now.Add(10 * time.Minute).Unix()),
-				NotBefore: oidc.UnixTime(now.Add(-10 * time.Minute).Unix()),
-				IssuedAt:  oidc.UnixTime(now.Unix()),
-				Extra: map[string]interface{}{
-					"roles": []string{"group-a", "group-b"},
-				},
-			}),
-			groupsClaimKey:   "roles",
-			authorizedGroups: []string{"group-c", "group-d"},
-			wantErr:          "user is member of [group-a group-b], but one of [group-c group-d] is required",
-		},
-		{
-			name: "valid user, valid token, malformed groups claim",
-			user: "jdoe",
-			token: mustJWT(t, signer, oidc.Claims{
-				Issuer:    "https://example.com",
-				Subject:   "jdoe",
-				Audience:  []string{"valid-aud"},
-				Expiry:    oidc.UnixTime(now.Add(10 * time.Minute).Unix()),
-				NotBefore: oidc.UnixTime(now.Add(-10 * time.Minute).Unix()),
-				IssuedAt:  oidc.UnixTime(now.Unix()),
-				Extra: map[string]interface{}{
-					"roles": "not a list",
-				},
-			}),
-			groupsClaimKey:   "roles",
-			authorizedGroups: []string{"group-c", "group-d"},
-			wantErr:          "user is not member of any groups, but one of [group-c group-d] is required",
-		},
-		{
-			name: "valid user, valid token, matching required ACR",
-			user: "jdoe",
-			token: mustJWT(t, signer, oidc.Claims{
-				Issuer:    "https://example.com",
-				Subject:   "jdoe",
-				Audience:  []string{"valid-aud"},
-				Expiry:    oidc.UnixTime(now.Add(10 * time.Minute).Unix()),
-				NotBefore: oidc.UnixTime(now.Add(-10 * time.Minute).Unix()),
-				IssuedAt:  oidc.UnixTime(now.Unix()),
-				Extra: map[string]interface{}{
-					"acr": "foo",
-				},
-			}),
-			requireACRs: []string{"foo"},
-			wantErr:     "",
-		},
-		{
-			name: "valid user, valid token, matching one of required ACRs",
-			user: "jdoe",
-			token: mustJWT(t, signer, oidc.Claims{
-				Issuer:    "https://example.com",
-				Subject:   "jdoe",
-				Audience:  []string{"valid-aud"},
-				Expiry:    oidc.UnixTime(now.Add(10 * time.Minute).Unix()),
-				NotBefore: oidc.UnixTime(now.Add(-10 * time.Minute).Unix()),
-				IssuedAt:  oidc.UnixTime(now.Unix()),
-				Extra: map[string]interface{}{
-					"acr": "biz",
-				},
-			}),
-			requireACRs: []string{"foo", "biz"},
-			wantErr:     "",
-		},
-
-		{
-			name: "valid user, valid token, not matching required ACR",
-			user: "jdoe",
-			token: mustJWT(t, signer, oidc.Claims{
-				Issuer:    "https://example.com",
-				Subject:   "jdoe",
-				Audience:  []string{"valid-aud"},
-				Expiry:    oidc.UnixTime(now.Add(10 * time.Minute).Unix()),
-				NotBefore: oidc.UnixTime(now.Add(-10 * time.Minute).Unix()),
-				IssuedAt:  oidc.UnixTime(now.Unix()),
-				Extra: map[string]interface{}{
-					"acr": "foo2",
-				},
-			}),
-			requireACRs: []string{"foo"},
-			wantErr:     "acr is \"foo2\", but one of [foo] is required",
-		},
-		{
-			name: "valid user, valid token, not matching one of required ACR",
-			user: "jdoe",
-			token: mustJWT(t, signer, oidc.Claims{
-				Issuer:    "https://example.com",
-				Subject:   "jdoe",
-				Audience:  []string{"valid-aud"},
-				Expiry:    oidc.UnixTime(now.Add(10 * time.Minute).Unix()),
-				NotBefore: oidc.UnixTime(now.Add(-10 * time.Minute).Unix()),
-				IssuedAt:  oidc.UnixTime(now.Unix()),
-				Extra: map[string]interface{}{
-					"acr": "foo2",
-				},
-			}),
-			requireACRs: []string{"foo", "bar", "biz"},
-			wantErr:     "acr is \"foo2\", but one of [foo bar biz] is required",
-		},
-
-		{
-			name: "valid user, valid token, invalid custom user template",
-			user: "jdoe",
-			token: mustJWT(t, signer, oidc.Claims{
-				Issuer:    "https://example.com",
-				Subject:   "jdoe",
-				Audience:  []string{"valid-aud"},
-				Expiry:    oidc.UnixTime(now.Add(10 * time.Minute).Unix()),
-				NotBefore: oidc.UnixTime(now.Add(-10 * time.Minute).Unix()),
-				IssuedAt:  oidc.UnixTime(now.Unix()),
-			}),
-			userTemplate: "{{broken}}",
-			wantErr:      "parsing user template",
-		},
-		{
-			name: "invalid user, valid token",
-			user: "invalid",
-			token: mustJWT(t, signer, oidc.Claims{
-				Issuer:    "https://example.com",
-				Subject:   "jdoe",
-				Audience:  []string{"valid-aud"},
-				Expiry:    oidc.UnixTime(now.Add(10 * time.Minute).Unix()),
-				NotBefore: oidc.UnixTime(now.Add(-10 * time.Minute).Unix()),
-				IssuedAt:  oidc.UnixTime(now.Unix()),
-			}),
-			wantErr: "expected user \"jdoe\"",
-		},
-		{
-			name: "valid user, expired token",
-			user: "jdoe",
-			token: mustJWT(t, signer, oidc.Claims{
-				Issuer:    "https://example.com",
-				Subject:   "jdoe",
-				Audience:  []string{"valid-aud"},
-				Expiry:    oidc.UnixTime(now.Add(-5 * time.Minute).Unix()),
-				NotBefore: oidc.UnixTime(now.Add(-10 * time.Minute).Unix()),
-				IssuedAt:  oidc.UnixTime(now.Add(-5 * time.Minute).Unix()),
-			}),
+			token: ti.token(nil, func() jwt.Claims {
+				c := valid("jdoe")
+				c.Expiry = jwt.NewNumericDate(now.Add(-time.Minute))
+				return c
+			}(), nil),
 			wantErr: "token is expired",
 		},
 		{
-			name: "valid user, token with incorrect aud",
-			user: "jdoe",
-			token: mustJWT(t, signer, oidc.Claims{
-				Issuer:    "https://example.com",
-				Subject:   "jdoe",
-				Audience:  []string{"invalid-aud"},
-				Expiry:    oidc.UnixTime(now.Add(10 * time.Minute).Unix()),
-				NotBefore: oidc.UnixTime(now.Add(-10 * time.Minute).Unix()),
-				IssuedAt:  oidc.UnixTime(now.Unix()),
-			}),
-			wantErr: "invalid audience claim",
+			name:    "signed by a key the issuer does not publish",
+			user:    "jdoe",
+			token:   ti.token(mustKey(t), valid("jdoe"), nil),
+			wantErr: "failed to verify signature",
+		},
+		{
+			name:    "not a JWT",
+			user:    "jdoe",
+			token:   "hunter2",
+			wantErr: "malformed jwt",
+		},
+		{
+			name:             "authorized group present",
+			user:             "jdoe",
+			token:            ti.token(nil, valid("jdoe"), map[string]any{"groups": []string{"a", "dba"}}),
+			authorizedGroups: []string{"dba"},
+		},
+		{
+			name:             "authorized group missing",
+			user:             "jdoe",
+			token:            ti.token(nil, valid("jdoe"), map[string]any{"groups": []string{"a"}}),
+			authorizedGroups: []string{"dba"},
+			wantErr:          "but one of [dba] is required",
+		},
+		{
+			name:             "no groups claim",
+			user:             "jdoe",
+			token:            ti.token(nil, valid("jdoe"), nil),
+			authorizedGroups: []string{"dba"},
+			wantErr:          "user is not member of any groups",
+		},
+		{
+			name:             "custom groups claim key",
+			user:             "jdoe",
+			token:            ti.token(nil, valid("jdoe"), map[string]any{"roles": []string{"dba"}}),
+			groupsClaimKey:   "roles",
+			authorizedGroups: []string{"dba"},
+		},
+		{
+			name:        "required acr present",
+			user:        "jdoe",
+			token:       ti.token(nil, valid("jdoe"), map[string]any{"acr": "mfa"}),
+			requireACRs: []string{"pwd", "mfa"},
+		},
+		{
+			name:        "required acr missing",
+			user:        "jdoe",
+			token:       ti.token(nil, valid("jdoe"), map[string]any{"acr": "pwd"}),
+			requireACRs: []string{"mfa"},
+			wantErr:     `acr is "pwd", but one of [mfa] is required`,
 		},
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-
-			verifier := oidc.NewVerifier("https://example.com", oidc.NewStaticKeysource(jose.JSONWebKeySet{Keys: verificationKeys}))
-			auth := &authenticator{
-				verifier: verifier,
-				aud:      "valid-aud",
+			auth, err := discoverAuthenticator(ctx, ti.URL(), "mariadb", "")
+			if err != nil {
+				t.Fatal(err)
 			}
 			auth.UserTemplate = tc.userTemplate
 			auth.GroupsClaimKey = tc.groupsClaimKey
 			auth.AuthorizedGroups = tc.authorizedGroups
 			auth.RequireACRs = tc.requireACRs
 
-			err := auth.Authenticate(ctx, tc.user, tc.token)
-			if err != nil && tc.wantErr == "" {
-				t.Errorf("want no err, got %v", err)
-			} else if err != nil && !strings.Contains(err.Error(), tc.wantErr) {
-				t.Errorf("want err %v, got %v", tc.wantErr, err)
-			} else if err == nil && tc.wantErr != "" {
-				t.Errorf("want err %v, got none", tc.wantErr)
+			err = auth.Authenticate(ctx, tc.user, tc.token)
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("want success, got %v", err)
+			case tc.wantErr != "" && err == nil:
+				t.Fatalf("want error containing %q, got success", tc.wantErr)
+			case tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr):
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
 			}
 		})
 	}
 }
 
-func mustJWT(t *testing.T, signer *signer.StaticSigner, claims oidc.Claims) string {
-	data, err := json.Marshal(claims)
-	if err != nil {
-		t.Fatal(err)
+func TestDiscoveryIssuerMismatch(t *testing.T) {
+	ti := newTestIssuer(t)
+	ti.discoveryIssuer = "https://impostor.example.com"
+	if _, err := discoverAuthenticator(context.Background(), ti.URL(), "mariadb", ""); err == nil {
+		t.Fatal("want error when the discovery document advertises a different issuer")
 	}
-
-	signed, err := signer.Sign(context.TODO(), data)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	return string(signed)
 }
-
-func mustLoadRSAKey(s string) *rsa.PrivateKey {
-	block, _ := pem.Decode([]byte(s))
-	if block == nil {
-		panic("no pem data found")
-	}
-
-	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
-	if err != nil {
-		panic(err)
-	}
-
-	return key
-}
-
-var testKey = mustLoadRSAKey(`-----BEGIN RSA PRIVATE KEY-----
-MIIEogIBAAKCAQEArmoiX5G36MKPiVGS1sicruEaGRrbhPbIKOf97aGGQRjXVngo
-Knwd2L4T9CRyABgQm3tLHHcT5crODoy46wX2g9onTZWViWWuhJ5wxXNmUbCAPWHb
-j9SunW53WuLYZ/IJLNZt5XYCAFPjAakWp8uMuuDwWo5EyFaw85X3FSMhVmmaYDd0
-cn+1H4+NS/52wX7tWmyvGUNJ8lzjFAnnOtBJByvkyIC7HDphkLQV4j//sMNY1mPX
-HbsYgFv2J/LIJtkjdYO2UoDhZG3Gvj16fMy2JE2owA8IX4/s+XAmA2PiTfd0J5b4
-drAKEcdDl83G6L3depEkTkfvp0ZLsh9xupAvIwIDAQABAoIBABKGgWonPyKA7+AF
-AxS/MC0/CZebC6/+ylnV8lm4K1tkuRKdJp8EmeL4pYPsDxPFepYZLWwzlbB1rxdK
-iSWld36fwEb0WXLDkxrQ/Wdrj3Wjyqs6ZqjLTVS5dAH6UEQSKDlT+U5DD4lbX6RA
-goCGFUeQNtdXfyTMWHU2+4yKM7NKzUpczFky+0d10Mg0ANj3/4IILdr3hqkmMSI9
-1TB9ksWBXJxt3nGxAjzSFihQFUlc231cey/HhYbvAX5fN0xhLxOk88adDcdXE7br
-3Ser1q6XaaFQSMj4oi1+h3RAT9MUjJ6johEqjw0PbEZtOqXvA1x5vfFdei6SqgKn
-Am3BspkCgYEA2lIiKEkT/Je6ZH4Omhv9atbGoBdETAstL3FnNQjkyVau9f6bxQkl
-4/sz985JpaiasORQBiTGY8JDT/hXjROkut91agi2Vafhr29L/mto7KZglfDsT4b2
-9z/EZH8wHw7eYhvdoBbMbqNDSI8RrGa4mpLpuN+E0wsFTzSZEL+QMQUCgYEAzIQh
-xnreQvDAhNradMqLmxRpayn1ORaPReD4/off+mi7hZRLKtP0iNgEVEWHJ6HEqqi1
-r38XAc8ap/lfOVMar2MLyCFOhYspdHZ+TGLZfr8gg/Fzeq9IRGKYadmIKVwjMeyH
-REPqg1tyrvMOE0HI5oqkko8JTDJ0OyVC0Vc6+AcCgYAqCzkywugLc/jcU35iZVOH
-WLdFq1Vmw5w/D7rNdtoAgCYPj6nV5y4Z2o2mgl6ifXbU7BMRK9Hc8lNeOjg6HfdS
-WahV9DmRA1SuIWPkKjE5qczd81i+9AHpmakrpWbSBF4FTNKAewOBpwVVGuBPcDTK
-59IE3V7J+cxa9YkotYuCNQKBgCwGla7AbHBEm2z+H+DcaUktD7R+B8gOTzFfyLoi
-Tdj+CsAquDO0BQQgXG43uWySql+CifoJhc5h4v8d853HggsXa0XdxaWB256yk2Wm
-MePTCRDePVm/ufLetqiyp1kf+IOaw1Oyux0j5oA62mDS3Iikd+EE4Z+BjPvefY/L
-E2qpAoGAZo5Wwwk7q8b1n9n/ACh4LpE+QgbFdlJxlfFLJCKstl37atzS8UewOSZj
-FDWV28nTP9sqbtsmU8Tem2jzMvZ7C/Q0AuDoKELFUpux8shm8wfIhyaPnXUGZoAZ
-Np4vUwMSYV5mopESLWOg3loBxKyLGFtgGKVCjGiQvy6zISQ4fQo=
------END RSA PRIVATE KEY-----`)

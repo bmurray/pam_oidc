@@ -11,11 +11,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"text/template"
 
-	"github.com/pardot/oidc"
-	"github.com/pardot/oidc/discovery"
+	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/net/http/httpproxy"
 )
 
@@ -46,11 +46,18 @@ type authenticator struct {
 	// If the list is empty, the ACR value is not checked.
 	RequireACRs []string
 
-	verifier *oidc.Verifier
-	aud      string
+	verifier *oidc.IDTokenVerifier
 }
 
-func discoverAuthenticator(ctx context.Context, issuer string, aud string, httpProxy string) (*authenticator, error) {
+// claims is what user templates render against. Field names match the
+// original pardot/oidc Claims type so existing templates keep working.
+type claims struct {
+	Subject string
+	ACR     string
+	Extra   map[string]any
+}
+
+func httpClient(httpProxy string) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if httpProxy != "" {
 		// Use no_proxy from environment, if present, but override proxy URL
@@ -63,26 +70,41 @@ func discoverAuthenticator(ctx context.Context, issuer string, aud string, httpP
 			return proxyFunc(r.URL)
 		}
 	}
+	return &http.Client{Transport: transport}
+}
 
-	client, err := discovery.NewClient(ctx, issuer, discovery.WithHTTPClient(&http.Client{
-		Transport: transport,
-	}))
+func discoverAuthenticator(ctx context.Context, issuer string, aud string, httpProxy string) (*authenticator, error) {
+	// The client is attached to the context so go-oidc uses it for both the
+	// discovery document and the JWKS fetches.
+	ctx = oidc.ClientContext(ctx, httpClient(httpProxy))
+
+	// NewProvider rejects a discovery document whose issuer differs from the
+	// configured one, so a token can't be verified against the wrong issuer.
+	provider, err := oidc.NewProvider(ctx, issuer)
 	if err != nil {
 		return nil, fmt.Errorf("discovering verifier: %v", err)
 	}
 
-	verifier := oidc.NewVerifier(issuer, client)
+	// ClientID is the required audience: the verifier rejects tokens whose aud
+	// does not contain it, and checks issuer, expiry and signature.
 	return &authenticator{
-		verifier: verifier,
-		aud:      aud,
+		verifier: provider.Verifier(&oidc.Config{ClientID: aud}),
 	}, nil
 }
 
 // Authenticate authenticates a user with the provided token.
 func (a *authenticator) Authenticate(ctx context.Context, user string, token string) error {
-	claims, err := a.verifier.VerifyRaw(ctx, a.aud, token)
+	idToken, err := a.verifier.Verify(ctx, token)
 	if err != nil {
 		return fmt.Errorf("verifying token: %v", err)
+	}
+
+	c := claims{Subject: idToken.Subject}
+	if err := idToken.Claims(&c.Extra); err != nil {
+		return fmt.Errorf("decoding claims: %v", err)
+	}
+	if acr, ok := c.Extra["acr"].(string); ok {
+		c.ACR = acr
 	}
 
 	userTemplate := "{{.Subject}}"
@@ -99,7 +121,7 @@ func (a *authenticator) Authenticate(ctx context.Context, user string, token str
 	}
 
 	buf := new(bytes.Buffer)
-	if err := userTmpl.Execute(buf, claims); err != nil {
+	if err := userTmpl.Execute(buf, c); err != nil {
 		return fmt.Errorf("executing user template: %v", err)
 	}
 
@@ -115,7 +137,7 @@ func (a *authenticator) Authenticate(ctx context.Context, user string, token str
 			groupsClaimKey = a.GroupsClaimKey
 		}
 
-		groupsClaim, ok := claims.Extra[groupsClaimKey].([]interface{})
+		groupsClaim, ok := c.Extra[groupsClaimKey].([]any)
 		if !ok {
 			return fmt.Errorf("user is not member of any groups, but one of %v is required", a.AuthorizedGroups)
 		}
@@ -133,8 +155,8 @@ func (a *authenticator) Authenticate(ctx context.Context, user string, token str
 
 	// Validate RequireACRs
 	if len(a.RequireACRs) > 0 {
-		if !isACRPresent(a.RequireACRs, claims.ACR) {
-			return fmt.Errorf("acr is %q, but one of %v is required", claims.ACR, a.RequireACRs)
+		if !slices.Contains(a.RequireACRs, c.ACR) {
+			return fmt.Errorf("acr is %q, but one of %v is required", c.ACR, a.RequireACRs)
 		}
 	}
 
@@ -143,22 +165,9 @@ func (a *authenticator) Authenticate(ctx context.Context, user string, token str
 
 func isMemberOfAtLeastOneGroup(authorizedGroups []string, groups []string) bool {
 	for _, wantGroup := range authorizedGroups {
-		for _, group := range groups {
-			if wantGroup == group {
-				return true
-			}
-		}
-	}
-
-	return false
-}
-
-func isACRPresent(authorizedACRs []string, acr string) bool {
-	for _, wantACR := range authorizedACRs {
-		if wantACR == acr {
+		if slices.Contains(groups, wantGroup) {
 			return true
 		}
 	}
-
 	return false
 }
