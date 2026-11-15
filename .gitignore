@@ -3,3 +3,6 @@ pam_oidc.h
 pam_oidc-*.rpm
 nfpm.yaml
 .vagrant/
+nfpm-*.yaml
+*.rpm
+*.deb

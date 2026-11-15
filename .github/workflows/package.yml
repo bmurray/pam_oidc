@@ -19,12 +19,13 @@ jobs:
       - name: Install nfpm
         run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
 
-      - name: Build RPM
-        run: make rpm
+      - name: Build packages (deb, rpm)
+        run: make packages
 
       - name: Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
+            libpam-oidc_*.deb
             pam_oidc-*.rpm

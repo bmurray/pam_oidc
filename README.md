@@ -27,6 +27,9 @@ Linux-PAM extensions are used, so currently the module only supports Linux. Cont
   that names a different issuer, and Kubernetes ServiceAccount subject mapping.
 - **[`Dockerfile.mariadb`](Dockerfile.mariadb)** builds MariaDB 12.3 with the
   module installed (see [Kubernetes ServiceAccount tokens with MariaDB](#kubernetes-serviceaccount-tokens-with-mariadb)).
+- **Debian/Ubuntu packages.** Tagged releases ship a `.deb` (`libpam-oidc`,
+  installed to `/usr/lib/x86_64-linux-gnu/security`) alongside the RPM
+  (`pam_oidc`, `/usr/lib64/security`). Build locally with `make deb` or `make rpm`.
 - The Go module path is now `github.com/bmurray/pam_oidc`.
 
 Another independent fork, [MatthiasValvekens/pam_oidc](https://github.com/MatthiasValvekens/pam_oidc),

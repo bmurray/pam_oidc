@@ -1,4 +1,6 @@
-name: "pam_oidc"
+# Rendered per format by `make rpm` / `make deb`: the package name and PAM
+# module directory follow each distro family's conventions.
+name: "${PKG_NAME}"
 arch: "amd64"
 platform: "linux"
 version: "${VERSION}"
@@ -9,7 +11,14 @@ homepage: "https://github.com/bmurray/pam_oidc"
 license: "BSD-3-Clause"
 contents:
   - src: pam_oidc.so
-    dst: /usr/lib64/security/${VERSIONED_OIDC_LIB}
-  - src: /usr/lib64/security/${VERSIONED_OIDC_LIB}
-    dst: /usr/lib64/security/pam_oidc.so
+    dst: ${PAM_DIR}/${VERSIONED_OIDC_LIB}
+  - src: ${PAM_DIR}/${VERSIONED_OIDC_LIB}
+    dst: ${PAM_DIR}/pam_oidc.so
     type: symlink
+overrides:
+  rpm:
+    depends:
+      - pam
+  deb:
+    depends:
+      - libpam0g
