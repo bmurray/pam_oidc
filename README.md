@@ -78,35 +78,72 @@ ServiceAccount token is typically around 850 bytes). Use a glibc-based image.
 
 ## Containers
 
-Rather than building custom database images, deliver the module with an init
-container and keep the stock image. The `Dockerfile.module` image copies
-`pam_oidc.so` and a CA bundle into a shared `emptyDir`; the PAM config then
-references the module by absolute path:
+To use the module with a stock service image (the official MariaDB or
+PostgreSQL images, for example) without building a custom one, deliver it with
+the init-container image:
+
+```
+ghcr.io/bmurray/pam_oidc:<tag>
+```
+
+Tags: `vX.Y.Z` for releases and `g<commit>` for individual commits. Pin by
+digest in production (`ghcr.io/bmurray/pam_oidc:<tag>@sha256:...`). The image is
+built from [`Dockerfile.module`](Dockerfile.module), after the unit tests and
+the real-PAM smoke test pass.
+
+**What it does.** Its default command copies two files into `/opt/pam-oidc`
+and exits:
+
+| File | Use |
+|---|---|
+| `/opt/pam-oidc/pam_oidc.so` | The module. Reference it by this absolute path in the PAM config. |
+| `/opt/pam-oidc/ca-certificates.crt` | A CA bundle, for images that lack one (the module verifies the issuer over HTTPS). Mount it at `/etc/ssl/certs/ca-certificates.crt`. |
+
+The service image must be glibc-based (glibc 2.34 or newer); see
+[Installing](#installing).
+
+**Kubernetes.** Share an `emptyDir` between the init container and the service:
 
 ```yaml
-initContainers:
-  - name: pam-oidc
-    image: ghcr.io/bmurray/pam_oidc:<version>   # copies into /opt/pam-oidc
-    volumeMounts:
-      - { name: pam-oidc, mountPath: /opt/pam-oidc }
-containers:
-  - name: db
-    image: postgres:18          # or mariadb:12.3, unmodified
-    volumeMounts:
-      - { name: pam-oidc, mountPath: /opt/pam-oidc, readOnly: true }
-      # Only if the image has no CA bundle (the official MariaDB and
-      # PostgreSQL images don't):
-      - { name: pam-oidc, mountPath: /etc/ssl/certs/ca-certificates.crt,
-          subPath: ca-certificates.crt, readOnly: true }
-volumes:
-  - { name: pam-oidc, emptyDir: {} }
+spec:
+  initContainers:
+    - name: pam-oidc
+      image: ghcr.io/bmurray/pam_oidc:<tag>
+      volumeMounts:
+        - { name: pam-oidc, mountPath: /opt/pam-oidc }
+  containers:
+    - name: db
+      image: postgres:18        # or mariadb:12.3, unmodified
+      volumeMounts:
+        - { name: pam-oidc, mountPath: /opt/pam-oidc, readOnly: true }
+        # Only if the image has no CA bundle (the official MariaDB and
+        # PostgreSQL images don't):
+        - { name: pam-oidc, mountPath: /etc/ssl/certs/ca-certificates.crt,
+            subPath: ca-certificates.crt, readOnly: true }
+        - { name: pam-config, mountPath: /etc/pam.d/postgres-oidc,
+            subPath: postgres-oidc, readOnly: true }
+  volumes:
+    - { name: pam-oidc, emptyDir: {} }
+    - { name: pam-config, configMap: { name: db-pam-config } }
 ```
 
+and in the PAM service file (here `/etc/pam.d/postgres-oidc`, from the
+ConfigMap):
+
 ```
-auth required /opt/pam-oidc/pam_oidc.so issuer=https://oidc.example.com aud=postgres ...
+auth required /opt/pam-oidc/pam_oidc.so issuer=https://oidc.example.com aud=postgres [user_template={{.Subject | trimPrefix "system:serviceaccount:"}}]
+account required pam_permit.so
 ```
 
-The database and the module then upgrade independently.
+**Plain Docker.** Fill a named volume once, then mount it into the service:
+
+```
+docker run --rm -v pam-oidc:/opt/pam-oidc ghcr.io/bmurray/pam_oidc:<tag>
+docker run ... -v pam-oidc:/opt/pam-oidc:ro postgres:18
+```
+
+The service and the module then upgrade independently: bump the database
+image's pin for a database patch, and the module image's pin for the module.
 
 ## Example Usage
 
@@ -265,6 +302,143 @@ CREATE DATABASE billing OWNER "apps:billing";
 
 Clients pass the token as the password, for example with libpq:
 `PGPASSWORD="$(cat /var/run/secrets/postgres/token)" psql "host=... user=apps:billing sslmode=verify-full"`.
+
+## Connecting from an application
+
+Whatever the database, a client authenticates the same way:
+
+1. **Get a token** from the issuer the server trusts, with the audience the
+   server requires (`aud=` in the PAM config). Use a dedicated audience per
+   service, so a token minted for one service can't be replayed against another.
+2. **Log in as the user the token maps to.** That's the server's `user_template`
+   rendered against the token's claims: by default the `sub` claim. With the
+   Kubernetes template above, a pod running as ServiceAccount `billing` in
+   namespace `apps` logs in as `apps:billing`.
+3. **Send the token as the password, over TLS.** It is a bearer credential sent
+   in cleartext, so the server should refuse non-TLS connections, and clients
+   should verify the server certificate.
+4. **Read a fresh token for every new connection.** Tokens expire (Kubernetes
+   rotates projected tokens hourly by default) and are checked only when a
+   connection opens, so open connections keep working, but a pool that reuses
+   one password fails as soon as it opens a connection after the token expired.
+   Use your driver's per-connection hook, as in the examples below.
+
+### Kubernetes ServiceAccount tokens
+
+Mount a projected token with the database's audience. The kubelet keeps the
+file current, so reading it at connect time always gets a valid token:
+
+```yaml
+spec:
+  serviceAccountName: billing
+  containers:
+    - name: app
+      volumeMounts:
+        - { name: db-token, mountPath: /var/run/secrets/postgres, readOnly: true }
+  volumes:
+    - name: db-token
+      projected:
+        sources:
+          - serviceAccountToken:
+              audience: postgres
+              expirationSeconds: 3600
+              path: token
+```
+
+The issuer must publish its discovery document and JWKS at a URL the database
+server can reach (`--service-account-issuer` and `--service-account-jwks-uri` on
+the API server; managed clusters such as EKS publish one already).
+
+### PostgreSQL
+
+The database administrator creates the role (no password):
+
+```sql
+CREATE ROLE "apps:billing" LOGIN;
+CREATE DATABASE billing OWNER "apps:billing";
+```
+
+From a shell:
+
+```
+PGPASSWORD="$(cat /var/run/secrets/postgres/token)" \
+  psql "host=postgres.example.svc user=apps:billing dbname=billing sslmode=verify-full sslrootcert=/etc/db-ca/ca.crt"
+```
+
+Go, with [pgx](https://github.com/jackc/pgx) behind `database/sql`; the hook
+runs before every new connection:
+
+```go
+cfg, err := pgx.ParseConfig("host=postgres.example.svc user=apps:billing dbname=billing sslmode=verify-full sslrootcert=/etc/db-ca/ca.crt")
+if err != nil {
+	return nil, err
+}
+db := stdlib.OpenDB(*cfg, stdlib.OptionBeforeConnect(func(ctx context.Context, c *pgx.ConnConfig) error {
+	tok, err := os.ReadFile("/var/run/secrets/postgres/token")
+	c.Password = strings.TrimSpace(string(tok))
+	return err
+}))
+```
+
+With `pgxpool`, set `poolCfg.BeforeConnect` to the same function.
+
+### MariaDB
+
+The server needs `pam_use_cleartext_plugin = ON` so that clients send the token
+with the standard cleartext plugin (and `require_secure_transport = ON`, since
+the token is sent in cleartext). The database administrator creates the account:
+
+```sql
+CREATE USER 'apps:billing'@'%' IDENTIFIED VIA pam USING 'mariadb-oidc';
+GRANT ALL ON billing.* TO 'apps:billing'@'%';
+```
+
+From a shell (the MariaDB client negotiates the plugin itself; MySQL's client
+needs `--enable-cleartext-plugin`):
+
+```
+mariadb -h mariadb.example.svc --ssl --ssl-ca=/etc/db-ca/ca.crt \
+  -u apps:billing -p"$(cat /var/run/secrets/mariadb/token)" billing
+```
+
+Go, with [go-sql-driver/mysql](https://github.com/go-sql-driver/mysql):
+
+```go
+cfg := mysql.NewConfig()
+cfg.Net = "tcp"
+cfg.Addr = "mariadb.example.svc:3306"
+cfg.User = "apps:billing"
+cfg.DBName = "billing"
+cfg.TLS = &tls.Config{RootCAs: caPool, ServerName: "mariadb.example.svc"}
+cfg.AllowCleartextPasswords = true // safe only because TLS is required
+if err := cfg.Apply(mysql.BeforeConnect(func(ctx context.Context, c *mysql.Config) error {
+	tok, err := os.ReadFile("/var/run/secrets/mariadb/token")
+	c.Passwd = strings.TrimSpace(string(tok))
+	return err
+})); err != nil {
+	return nil, err
+}
+conn, err := mysql.NewConnector(cfg)
+if err != nil {
+	return nil, err
+}
+db := sql.OpenDB(conn)
+```
+
+These Go examples were tested against live MariaDB 12.3 and PostgreSQL 18
+servers, with several new connections each authenticating through the hook.
+
+### When a login fails
+
+The server log says why. Look for `pam_oidc:` lines, for example:
+
+| Log message | Meaning |
+|---|---|
+| `expected audience "postgres" got ["mariadb"]` | Token minted for a different service. Fix the client's token audience. |
+| `expected user "apps:billing" but is authenticating as "apps:other"` | Username doesn't match the token. Log in as the mapped name. |
+| `token is expired` | Stale token. Read the token file at connect time. |
+| `malformed jwt` | The password isn't a JWT (wrong file, or an old static password). |
+| `failed to discover authenticator` | The server can't fetch the issuer's discovery document. Check its network access and CA bundle. |
 
 ## Development
 

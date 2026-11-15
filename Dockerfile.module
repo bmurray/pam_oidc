@@ -25,6 +25,9 @@ RUN go vet ./... && go test -count=1 ./... \
  && sh hack/smoke-test.sh /out/pam_oidc.so
 
 FROM busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+LABEL org.opencontainers.image.source="https://github.com/bmurray/pam_oidc" \
+      org.opencontainers.image.description="pam_oidc init-container image: copies pam_oidc.so and a CA bundle into /opt/pam-oidc" \
+      org.opencontainers.image.licenses="BSD-3-Clause"
 COPY --from=build /out/pam_oidc.so /pam_oidc/pam_oidc.so
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /pam_oidc/ca-certificates.crt
 CMD ["cp", "/pam_oidc/pam_oidc.so", "/pam_oidc/ca-certificates.crt", "/opt/pam-oidc/"]
