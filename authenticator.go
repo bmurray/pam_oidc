@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/net/http/httpproxy"
@@ -45,6 +46,11 @@ type authenticator struct {
 	//
 	// If the list is empty, the ACR value is not checked.
 	RequireACRs []string
+
+	// NotBefore, if set, rejects tokens issued before this time (by their iat
+	// claim), revoking every earlier token at once. Tokens without iat are
+	// rejected when it is set.
+	NotBefore time.Time
 
 	verifier *oidc.IDTokenVerifier
 }
@@ -97,6 +103,16 @@ func (a *authenticator) Authenticate(ctx context.Context, user string, token str
 	idToken, err := a.verifier.Verify(ctx, token)
 	if err != nil {
 		return fmt.Errorf("verifying token: %w", err)
+	}
+
+	if !a.NotBefore.IsZero() {
+		if idToken.IssuedAt.IsZero() {
+			return fmt.Errorf("token has no iat claim, but not_before is set")
+		}
+		if idToken.IssuedAt.Before(a.NotBefore) {
+			return fmt.Errorf("token issued at %s, before not_before %s",
+				idToken.IssuedAt.UTC().Format(time.RFC3339), a.NotBefore.UTC().Format(time.RFC3339))
+		}
 	}
 
 	c := claims{Subject: idToken.Subject}

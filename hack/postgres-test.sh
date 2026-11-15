@@ -78,6 +78,16 @@ notified=$(psql_tok /tmp/token apps:tester -c 'LISTEN ch' -c 'SELECT pg_sleep(2)
 grep -q 'notification "ch" with payload "hello"' <<<"$notified" || fail "LISTEN/NOTIFY: $notified"
 pass "LISTEN/NOTIFY delivered"
 
+# not_before revokes tokens issued before the cutoff. PostgreSQL re-reads the
+# PAM config on every connection, so no restart is needed here.
+cp /etc/pam.d/pgtest /tmp/pgtest.orig
+sed -i "s|aud=postgres|aud=postgres not_before=$(( $(date +%s) + 3600 ))|" /etc/pam.d/pgtest
+psql_tok /tmp/token apps:tester -c 'SELECT 1' 2>/dev/null && fail "token issued before not_before accepted"
+grep -q "before not_before" /tmp/pg.log || fail "no not_before rejection in server log"
+cp /tmp/pgtest.orig /etc/pam.d/pgtest
+[ "$(psql_tok /tmp/token apps:tester -c 'SELECT current_user')" = "apps:tester" ] || fail "login after removing not_before"
+pass "not_before revokes older tokens (and lifting it restores access)"
+
 grep -qiE "terminated by signal|server process .* was terminated|PANIC" /tmp/pg.log && fail "backend crashed"
 pass "no backend crashes in the server log"
 grep -q 'pam_oidc: authenticated "apps:tester"' /tmp/pg.log || fail "no pam_oidc audit line in server log"

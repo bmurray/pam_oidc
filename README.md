@@ -215,6 +215,27 @@ Default: (no value)
 
 If specified, an HTTP proxy used to connect to the issuer to discover OpenID Connect parameters.
 
+#### not\_before
+
+Default: (no value)
+
+If specified, tokens issued before this time are rejected, judged by their
+`iat` (issued-at) claim. Use it to revoke every token minted before a given
+moment at once, for example after a long-lived token leaks. The module verifies
+tokens against the issuer's signing keys and doesn't contact the issuer per
+login, so it can't otherwise tell that a token's subject was deleted.
+
+Accepts an RFC 3339 timestamp (`not_before=2026-11-15T00:00:00Z`) or Unix
+seconds (`not_before=1794700800`). Tokens without an `iat` claim are rejected
+while it is set. This is unrelated to the JWT `nbf` claim, which go-oidc already
+enforces.
+
+Clients that hold a token issued before the cutoff fail until they get a new
+one. Kubernetes refreshes mounted ServiceAccount tokens on its own schedule,
+so restart affected pods to make them pick up fresh tokens straight away. If the
+PAM config is mounted from a ConfigMap with `subPath`, the server doesn't see an
+edit until it restarts.
+
 ## Kubernetes ServiceAccount tokens with MariaDB
 
 Workloads can log in to MariaDB as `<namespace>:<serviceaccount>`, using their

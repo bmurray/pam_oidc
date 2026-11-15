@@ -108,6 +108,7 @@ func TestAuthenticate(t *testing.T) {
 		groupsClaimKey   string
 		authorizedGroups []string
 		requireACRs      []string
+		notBefore        time.Time
 		wantErr          string
 	}{
 		{
@@ -210,6 +211,43 @@ func TestAuthenticate(t *testing.T) {
 			requireACRs: []string{"pwd", "mfa"},
 		},
 		{
+			name:      "issued after not_before",
+			user:      "jdoe",
+			token:     ti.token(nil, valid("jdoe"), nil),
+			notBefore: now.Add(-time.Hour),
+		},
+		{
+			name: "issued before not_before is revoked",
+			user: "jdoe",
+			token: ti.token(nil, func() jwt.Claims {
+				c := valid("jdoe")
+				c.IssuedAt = jwt.NewNumericDate(now.Add(-2 * time.Hour))
+				return c
+			}(), nil),
+			notBefore: now.Add(-time.Hour),
+			wantErr:   "before not_before",
+		},
+		{
+			name: "no iat is rejected when not_before is set",
+			user: "jdoe",
+			token: ti.token(nil, func() jwt.Claims {
+				c := valid("jdoe")
+				c.IssuedAt = nil
+				return c
+			}(), nil),
+			notBefore: now.Add(-time.Hour),
+			wantErr:   "no iat claim",
+		},
+		{
+			name: "no iat is fine without not_before",
+			user: "jdoe",
+			token: ti.token(nil, func() jwt.Claims {
+				c := valid("jdoe")
+				c.IssuedAt = nil
+				return c
+			}(), nil),
+		},
+		{
 			name:        "required acr missing",
 			user:        "jdoe",
 			token:       ti.token(nil, valid("jdoe"), map[string]any{"acr": "pwd"}),
@@ -229,6 +267,7 @@ func TestAuthenticate(t *testing.T) {
 			auth.GroupsClaimKey = tc.groupsClaimKey
 			auth.AuthorizedGroups = tc.authorizedGroups
 			auth.RequireACRs = tc.requireACRs
+			auth.NotBefore = tc.notBefore
 
 			err = auth.Authenticate(ctx, tc.user, tc.token)
 			switch {

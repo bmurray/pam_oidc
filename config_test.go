@@ -8,6 +8,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 )
@@ -59,10 +60,32 @@ func TestParseConfigFromArgs(t *testing.T) {
 			args:    []string{"issuer=https://example.com", "invalid=foo"},
 			wantErr: "unknown option: invalid",
 		},
+		{
+			name: "not_before as RFC 3339",
+			args: []string{"issuer=https://example.com", "aud=example-aud", "not_before=2026-11-15T00:00:00Z"},
+			want: &config{
+				Issuer:    "https://example.com",
+				Aud:       "example-aud",
+				NotBefore: time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC),
+			},
+		},
+		{
+			name: "not_before as Unix seconds",
+			args: []string{"issuer=https://example.com", "aud=example-aud", "not_before=1794700800"},
+			want: &config{
+				Issuer:    "https://example.com",
+				Aud:       "example-aud",
+				NotBefore: time.Unix(1794700800, 0),
+			},
+		},
+		{
+			name:    "not_before invalid",
+			args:    []string{"issuer=https://example.com", "aud=example-aud", "not_before=yesterday"},
+			wantErr: "not_before",
+		},
 	}
 
 	for _, tc := range cases {
-
 		config, err := configFromArgs(tc.args)
 		if err != nil && tc.wantErr == "" {
 			t.Fatalf("wanted no error, but got %v", err)

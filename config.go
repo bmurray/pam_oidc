@@ -7,7 +7,9 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 )
 
 type config struct {
@@ -30,6 +32,9 @@ type config struct {
 	RequireACRs []string
 	// HTTPProxy is the HTTP proxy server used to connect to HTTP services.
 	HTTPProxy string
+	// NotBefore, if set, rejects tokens issued (by their iat claim) before this
+	// time, revoking every token minted earlier at once.
+	NotBefore time.Time
 }
 
 func configFromArgs(args []string) (*config, error) {
@@ -58,10 +63,28 @@ func configFromArgs(args []string) (*config, error) {
 			c.RequireACRs = strings.Split(value, ",")
 		case "http_proxy":
 			c.HTTPProxy = value
+		case "not_before":
+			t, err := parseTime(value)
+			if err != nil {
+				return nil, fmt.Errorf("not_before: %w", err)
+			}
+			c.NotBefore = t
 		default:
 			return nil, fmt.Errorf("unknown option: %v", key)
 		}
 	}
 
 	return c, nil
+}
+
+// parseTime accepts an RFC 3339 timestamp or Unix seconds.
+func parseTime(s string) (time.Time, error) {
+	if secs, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return time.Unix(secs, 0), nil
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("want an RFC 3339 timestamp or Unix seconds, got %q", s)
+	}
+	return t, nil
 }
