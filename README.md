@@ -63,6 +63,10 @@ in). At runtime it needs:
 **musl (Alpine) is not supported.** musl's loader refuses to `dlopen` Go
 `c-shared` libraries, because the Go runtime uses the initial-exec TLS model,
 and PAM always loads modules with `dlopen`.
+Running a static build through `pam_exec.so expose_authtok` is not a
+workaround either: `pam_exec` copies the password into a 512-byte buffer and
+silently truncates it, and OIDC tokens are usually longer (a Kubernetes
+ServiceAccount token is typically around 850 bytes). Use a glibc-based image.
 
 ## Example Usage
 
