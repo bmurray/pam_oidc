@@ -49,8 +49,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Build PostgreSQL image
-        run: docker build -f Dockerfile.postgres -t postgres-oidc .
+      - name: Build init-container image
+        run: docker build -f Dockerfile.module -t pam-oidc-module .
 
-      - name: Integration test
-        run: docker build -f Dockerfile.pgtest --build-arg IMAGE=postgres-oidc .
+      - name: Integration test (stock PostgreSQL + init-container module)
+        run: docker build -f Dockerfile.pgtest --build-arg MODULE=pam-oidc-module .

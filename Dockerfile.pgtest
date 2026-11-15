@@ -1,10 +1,15 @@
-# Runs hack/postgres-test.sh: PostgreSQL authenticating through pam_oidc,
+# Runs hack/postgres-test.sh: a stock PostgreSQL image authenticating through
+# pam_oidc delivered the way the Dockerfile.module init container delivers it
+# (module and CA bundle under /opt/pam-oidc, module referenced by absolute path),
 # against a throwaway local issuer.
 #
-#   docker build -f Dockerfile.postgres -t postgres-oidc .
-#   docker build -f Dockerfile.pgtest --build-arg IMAGE=postgres-oidc .
+#   docker build -f Dockerfile.module -t pam-oidc-module .
+#   docker build -f Dockerfile.pgtest --build-arg MODULE=pam-oidc-module .
 
-ARG IMAGE=ghcr.io/bmurray/postgres-oidc:18
+ARG MODULE=ghcr.io/bmurray/pam_oidc:latest
+ARG POSTGRES=postgres:18.7-trixie@sha256:2ea8630df176ad090ec92136dee850397c5af8781e4bcf2e4162593691c61bbc
+
+FROM ${MODULE} AS module
 
 FROM golang:1.27-bookworm AS issuer
 WORKDIR /src
@@ -13,7 +18,10 @@ RUN go mod download
 COPY hack/testissuer hack/testissuer
 RUN CGO_ENABLED=0 go build -o /out/testissuer ./hack/testissuer
 
-FROM ${IMAGE}
+FROM ${POSTGRES}
+COPY --from=module /pam_oidc/pam_oidc.so /opt/pam-oidc/pam_oidc.so
+COPY --from=module /pam_oidc/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=issuer /out/testissuer /usr/local/bin/testissuer
 COPY hack/postgres-test.sh /usr/local/bin/postgres-test.sh
+ENV PAM_OIDC_MODULE=/opt/pam-oidc/pam_oidc.so
 RUN bash /usr/local/bin/postgres-test.sh

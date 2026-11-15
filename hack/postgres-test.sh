@@ -3,7 +3,8 @@
 # in-process in the backend. Beyond the login itself it exercises backend
 # features that rely on PostgreSQL's own signal handling (SIGURG latches,
 # timeouts, cancellation, parallel workers, LISTEN/NOTIFY), since the Go runtime
-# also uses SIGURG. Run inside the postgres-oidc image (see Dockerfile.pgtest).
+# also uses SIGURG. Run via Dockerfile.pgtest: a stock PostgreSQL image with the
+# module delivered as by the Dockerfile.module init container (PAM_OIDC_MODULE).
 set -euo pipefail
 
 fail() { echo "FAIL: $*" >&2; [ -f /tmp/pg.log ] && tail -20 /tmp/pg.log >&2; exit 1; }
@@ -20,7 +21,7 @@ done
 chown postgres /tmp/token /tmp/forged /tmp/wrongaud
 
 cat > /etc/pam.d/pgtest <<EOF
-auth required pam_oidc.so issuer=$issuer aud=postgres [user_template={{.Subject | trimPrefix "system:serviceaccount:"}}]
+auth required ${PAM_OIDC_MODULE:-pam_oidc.so} issuer=$issuer aud=postgres [user_template={{.Subject | trimPrefix "system:serviceaccount:"}}]
 account required pam_permit.so
 EOF
 

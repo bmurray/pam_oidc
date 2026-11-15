@@ -1,0 +1,30 @@
+# Init-container image that delivers pam_oidc to a stock service image (MariaDB,
+# PostgreSQL, ...) instead of baking it into a custom one. Mount an emptyDir at
+# /opt/pam-oidc; the default command copies in:
+#
+#   /opt/pam-oidc/pam_oidc.so            reference it by absolute path in the PAM config
+#   /opt/pam-oidc/ca-certificates.crt    mount at /etc/ssl/certs/ca-certificates.crt
+#                                        in the service container if its image has none
+#
+#   docker build -f Dockerfile.module -t ghcr.io/bmurray/pam_oidc:<version> .
+#
+# The module is built exactly as the release .so (Debian 12 base, glibc >= 2.34)
+# and passes the unit tests and the real-PAM smoke test first.
+
+FROM golang:1.27-bookworm AS build
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libpam0g-dev \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY *.go *.c ./
+COPY hack/smoke-test.sh hack/pamcheck.c hack/
+RUN go vet ./... && go test -count=1 ./... \
+ && go build -trimpath -buildmode=c-shared -o /out/pam_oidc.so . \
+ && sh hack/smoke-test.sh /out/pam_oidc.so
+
+FROM busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+COPY --from=build /out/pam_oidc.so /pam_oidc/pam_oidc.so
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /pam_oidc/ca-certificates.crt
+CMD ["cp", "/pam_oidc/pam_oidc.so", "/pam_oidc/ca-certificates.crt", "/opt/pam-oidc/"]

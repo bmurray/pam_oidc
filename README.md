@@ -27,13 +27,13 @@ Linux-PAM extensions are used, so currently the module only supports Linux. Cont
 - **Tests rewritten** around an in-process issuer, covering wrong audience or
   issuer, expiry, an unpublished signing key, non-JWT input, a discovery document
   that names a different issuer, and Kubernetes ServiceAccount subject mapping.
-- **[`Dockerfile.mariadb`](Dockerfile.mariadb)** builds MariaDB 12.3 with the
-  module installed (see [Kubernetes ServiceAccount tokens with MariaDB](#kubernetes-serviceaccount-tokens-with-mariadb)).
+- **Init-container image** ([`Dockerfile.module`](Dockerfile.module)) delivers
+  the module to stock service images (MariaDB, PostgreSQL) at deploy time, so
+  you don't maintain custom database images (see [Containers](#containers)).
 - **Debian/Ubuntu packages.** Tagged releases ship a `.deb` (`libpam-oidc`,
   installed to `/usr/lib/x86_64-linux-gnu/security`) alongside the RPM
   (`pam_oidc`, `/usr/lib64/security`). Build locally with `make deb` or `make rpm`.
-- **[`Dockerfile.postgres`](Dockerfile.postgres)** builds PostgreSQL 18 with
-  the module installed (see [PostgreSQL](#postgresql)), with an integration test.
+- **PostgreSQL support**, with an integration test (see [PostgreSQL](#postgresql)).
 - The Go module path is now `github.com/bmurray/pam_oidc`.
 
 Another independent fork, [MatthiasValvekens/pam_oidc](https://github.com/MatthiasValvekens/pam_oidc),
@@ -75,6 +75,38 @@ Running a static build through `pam_exec.so expose_authtok` is not a
 workaround either: `pam_exec` copies the password into a 512-byte buffer and
 silently truncates it, and OIDC tokens are usually longer (a Kubernetes
 ServiceAccount token is typically around 850 bytes). Use a glibc-based image.
+
+## Containers
+
+Rather than building custom database images, deliver the module with an init
+container and keep the stock image. The `Dockerfile.module` image copies
+`pam_oidc.so` and a CA bundle into a shared `emptyDir`; the PAM config then
+references the module by absolute path:
+
+```yaml
+initContainers:
+  - name: pam-oidc
+    image: ghcr.io/bmurray/pam_oidc:<version>   # copies into /opt/pam-oidc
+    volumeMounts:
+      - { name: pam-oidc, mountPath: /opt/pam-oidc }
+containers:
+  - name: db
+    image: postgres:18          # or mariadb:12.3, unmodified
+    volumeMounts:
+      - { name: pam-oidc, mountPath: /opt/pam-oidc, readOnly: true }
+      # Only if the image has no CA bundle (the official MariaDB and
+      # PostgreSQL images don't):
+      - { name: pam-oidc, mountPath: /etc/ssl/certs/ca-certificates.crt,
+          subPath: ca-certificates.crt, readOnly: true }
+volumes:
+  - { name: pam-oidc, emptyDir: {} }
+```
+
+```
+auth required /opt/pam-oidc/pam_oidc.so issuer=https://oidc.example.com aud=postgres ...
+```
+
+The database and the module then upgrade independently.
 
 ## Example Usage
 
@@ -193,6 +225,9 @@ volumes:
             path: token
 ```
 
+With the [init-container image](#containers), write the module's absolute
+path, `/opt/pam-oidc/pam_oidc.so`, instead of `pam_oidc.so`.
+
 MariaDB's `auth_pam` runs PAM in a separate helper process (`auth_pam_tool`), so
 the Go runtime never runs inside `mariadbd`. Its stderr is the server's, so
 `pam_oidc:` messages appear in the server log.
@@ -245,7 +280,7 @@ Docker, so the host needs no PAM development headers:
 
 ```
 docker build -f Dockerfile.release --output dist .   # writes dist/pam_oidc-linux-amd64-gnu.so
-docker build -f Dockerfile.mariadb -t mariadb-oidc . # MariaDB image with the module
+docker build -f Dockerfile.module -t pam-oidc-module .  # init-container image
 ```
 
 `make deb` and `make rpm` build packages from a compiled `pam_oidc.so` (they
