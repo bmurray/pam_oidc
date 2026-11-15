@@ -1,10 +1,37 @@
-# DEPRECATED: pam\_oidc
+# pam\_oidc
 
-**Note: This project is no longer under active development and has been archived**
+> **This is a maintained fork of [salesforce/pam_oidc](https://github.com/salesforce/pam_oidc),
+> which Salesforce archived in 2025.** It is not affiliated with or endorsed by
+> Salesforce. The original work is copyright 2021 Salesforce.com, Inc., under the
+> BSD 3-Clause License ([LICENSE.txt](LICENSE.txt)); this fork's changes are
+> released under the same license.
 
-**pam_oidc** authenticates users with an OpenID Connect (OIDC) token.
+**pam_oidc** authenticates users with an OpenID Connect (OIDC) token: the token
+is presented as the password and verified locally against the issuer's published
+signing keys (JWKS). There is no interactive login flow, which makes it suited to
+machine identities such as Kubernetes ServiceAccount tokens.
 
 Linux-PAM extensions are used, so currently the module only supports Linux. Contributions to support other operating systems are welcomed.
+
+## What changed in this fork
+
+- **Maintained JWT libraries.** Verification moved off the abandoned
+  `pardot/oidc` library and the deprecated `gopkg.in/square/go-jose.v2` onto
+  [`coreos/go-oidc` v3](https://github.com/coreos/go-oidc) and `go-jose` v4:
+  discovery with issuer matching, cached JWKS, and signature, issuer, audience
+  and expiry checks. Options and user templates are unchanged.
+- **Logs to stderr as well as syslog**, since containers usually have no syslog
+  daemon. Successful logins are logged by username. Tokens are never logged.
+- **Tests rewritten** around an in-process issuer, covering wrong audience or
+  issuer, expiry, an unpublished signing key, non-JWT input, a discovery document
+  that names a different issuer, and Kubernetes ServiceAccount subject mapping.
+- **[`Dockerfile.mariadb`](Dockerfile.mariadb)** builds MariaDB 12.3 with the
+  module installed (see [Kubernetes ServiceAccount tokens with MariaDB](#kubernetes-serviceaccount-tokens-with-mariadb)).
+- The Go module path is now `github.com/bmurray/pam_oidc`.
+
+Another independent fork, [MatthiasValvekens/pam_oidc](https://github.com/MatthiasValvekens/pam_oidc),
+takes a different route: it vendors and maintains `pardot/oidc` itself and adds
+on-disk caching of signing keys.
 
 ## Example Usage
 
@@ -75,6 +102,57 @@ If specified, a comma-separated list of acrs one of which must match the `acr` c
 Default: (no value)
 
 If specified, an HTTP proxy used to connect to the issuer to discover OpenID Connect parameters.
+
+## Kubernetes ServiceAccount tokens with MariaDB
+
+Workloads can log in to MariaDB as `<namespace>:<serviceaccount>`, using their
+ServiceAccount token as the password, provided the cluster's ServiceAccount
+issuer publishes its discovery document and JWKS at an HTTPS URL the server can
+reach.
+
+`/etc/pam.d/mariadb-oidc` (the brackets let the argument contain spaces;
+`pam_permit` is needed because MariaDB also runs the PAM account phase):
+
+```
+auth required pam_oidc.so issuer=https://oidc.example.com aud=mariadb [user_template={{.Subject | trimPrefix "system:serviceaccount:"}}]
+account required pam_permit.so
+```
+
+Server configuration. The token is a bearer credential sent as a cleartext
+password, so require TLS:
+
+```ini
+[mariadbd]
+plugin_load_add = auth_pam
+pam_use_cleartext_plugin = ON
+require_secure_transport = ON
+```
+
+Accounts:
+
+```sql
+CREATE USER 'apps:billing'@'%' IDENTIFIED VIA pam USING 'mariadb-oidc';
+GRANT ALL ON billing.* TO 'apps:billing'@'%';
+```
+
+Clients mount a projected token with a dedicated audience, so a database token
+can't be replayed against the Kubernetes API, and re-read it on every connect
+because the kubelet rotates it:
+
+```yaml
+volumes:
+  - name: mariadb-token
+    projected:
+      sources:
+        - serviceAccountToken:
+            audience: mariadb
+            expirationSeconds: 600
+            path: token
+```
+
+MariaDB's `auth_pam` runs PAM in a separate helper process (`auth_pam_tool`), so
+the Go runtime never runs inside `mariadbd`. Its stderr is the server's, so
+`pam_oidc:` messages appear in the server log.
 
 ## Local Testing
 

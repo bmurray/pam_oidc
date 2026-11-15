@@ -4,8 +4,8 @@ platform: "linux"
 version: "${VERSION}"
 description: |
   pam_oidc authenticates users with an OpenID Connect (OIDC) token.
-vendor: "Salesforce"
-homepage: "https://salesforce.com"
+vendor: "bmurray/pam_oidc (fork of salesforce/pam_oidc)"
+homepage: "https://github.com/bmurray/pam_oidc"
 license: "BSD-3-Clause"
 contents:
   - src: pam_oidc.so

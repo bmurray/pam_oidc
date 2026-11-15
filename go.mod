@@ -1,4 +1,4 @@
-module git.dev.pardot.com/pardot/pam_oidc
+module github.com/bmurray/pam_oidc
 
 go 1.26.0
 
